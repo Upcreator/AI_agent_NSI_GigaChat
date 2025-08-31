@@ -8,12 +8,17 @@ import uvicorn
 import logging
 from gigachat import GigaChat
 
+# Создаем директорию и файл с правильными правами
+log_dir = '/app/logs'
+os.makedirs(log_dir, exist_ok=True)
+log_file = os.path.join(log_dir, 'server.log')
+
 # Настройка логирования
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
     handlers=[
-        logging.FileHandler('server.log', encoding='utf-8'),
+        logging.FileHandler(log_file, encoding='utf-8'),
         logging.StreamHandler()
     ]
 )

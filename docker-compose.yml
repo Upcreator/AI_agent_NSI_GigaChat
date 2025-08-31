@@ -6,6 +6,6 @@ services:
     ports:
       - "8090:8090"
     environment:
-      - GIGACHAT_CREDENTIALS=NmYxZTE4ZWYtMGFlNy00NDI4LWFiZDItNjRkMjQ0ODFhYmExOmI5YzE5ZjdkLWVhNGMtNGFhMC1hMGI1LTgxMjFiZDhlYzZkZg==
+      - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS}
     volumes:
-      - ./server.log:/home/app/server.log 
+      - ./logs:/app/logs
