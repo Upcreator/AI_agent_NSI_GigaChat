@@ -8,7 +8,7 @@ TIMEOUT=10         # Таймаут для curl запроса
 STARTUP_WAIT=30    # Время ожидания после запуска сервиса
 BACKUP_DIR="/home/rbrol/AI_agent_NSI_GigaChat/backup"  # Директория для бэкапов
 CONTAINER_NAME="ai_agent_nsi_gigachat-gigachat-service-1"  # Имя контейнера
-BACKUP_INTERVAL=20  # 1 час в секундах (3600 = 1 час, можно изменить для тестов)
+BACKUP_INTERVAL=20  # 20 секунд для теста
 
 # Создаем директорию для бэкапов если её нет
 mkdir -p "$BACKUP_DIR"
@@ -28,14 +28,19 @@ backup_logs() {
 
     # Проверяем, существует ли контейнер
     if docker ps -a --format '{{.Names}}' | grep -q "^$CONTAINER_NAME$"; then
-        # Копируем логи из контейнера
-        if docker cp "$CONTAINER_NAME:/app/server.log" "$backup_filename" 2>/dev/null; then
+        # Копируем логи из контейнера (новый путь)
+        if docker cp "$CONTAINER_NAME:/app/logs/server.log" "$backup_filename" 2>/dev/null; then
             log_message "Логи успешно сохранены в $backup_filename"
         else
-            # Если не удалось скопировать файл, получаем логи через docker logs
-            log_message "Не удалось скопировать server.log, получаем логи через docker logs..."
-            docker logs "$CONTAINER_NAME" > "$backup_filename" 2>&1
-            log_message "Логи docker сохранены в $backup_filename"
+            # Если не удалось скопировать файл, пробуем старый путь
+            if docker cp "$CONTAINER_NAME:/app/server.log" "$backup_filename" 2>/dev/null; then
+                log_message "Логи успешно сохранены из старого пути в $backup_filename"
+            else
+                # Если не удалось скопировать файл, получаем логи через docker logs
+                log_message "Не удалось скопировать server.log, получаем логи через docker logs..."
+                docker logs "$CONTAINER_NAME" > "$backup_filename" 2>&1
+                log_message "Логи docker сохранены в $backup_filename"
+            fi
         fi
     else
         log_message "Контейнер $CONTAINER_NAME не найден, пропускаем сохранение логов"
@@ -48,7 +53,7 @@ check_and_backup() {
     local time_since_last_backup=$((current_time - last_backup_time))
 
     if [ $time_since_last_backup -ge $BACKUP_INTERVAL ]; then
-        log_message "Пора делать регулярный бэкап логов (прошло $((time_since_last_backup / 60)) минут)"
+        log_message "Пора делать регулярный бэкап логов (прошло $((time_since_last_backup)) секунд)"
         backup_logs
         last_backup_time=$current_time
     fi
@@ -100,7 +105,7 @@ hard_restart() {
 
 # Инициализация времени последнего бэкапа
 last_backup_time=$(date +%s)
-log_message "Скрипт запущен. Первый бэкап будет через $((BACKUP_INTERVAL / 60)) минут"
+log_message "Скрипт запущен. Первый бэкап будет через $BACKUP_INTERVAL секунд"
 
 # Бесконечный цикл мониторинга
 while true; do
@@ -152,6 +157,6 @@ while true; do
     fi
 
     # Ждем заданное время до следующей проверки
-    log_message "Ожидание $((CHECK_INTERVAL / 60)) минут до следующей проверки..."
+    log_message "Ожидание $((CHECK_INTERVAL)) секунд до следующей проверки..."
     sleep $CHECK_INTERVAL
 done

@@ -8,4 +8,4 @@ services:
     environment:
       - GIGACHAT_CREDENTIALS=${GIGACHAT_CREDENTIALS}
     volumes:
-      - ./server.log:/home/app/server.log 
+      - ./logs:/app/logs
