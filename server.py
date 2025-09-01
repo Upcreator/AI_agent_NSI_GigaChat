@@ -58,6 +58,21 @@ class Result(BaseModel):
 class NormalizeResponse(BaseModel):
     results: list[Result]
 
+# Модель для многоуровневого класса
+class ClassLevel(BaseModel):
+    уровень1: str
+    уровень2: str
+    уровень3: str
+
+class ClassifyResult(BaseModel):
+    mdm_key: str
+    наименование: str
+    полное_наименование: str
+    класс: ClassLevel
+
+class ClassifyResponse(BaseModel):
+    results: list[ClassifyResult]
+
 # Инициализация GigaChat
 giga_chat = GigaChat(
     credentials=os.getenv("GIGACHAT_CREDENTIALS"),
@@ -143,6 +158,51 @@ def generate_prompt(full_name: str) -> str:
 
 Вход: "{full_name}"
 Выход:'''
+
+def generate_classify_prompt(full_name: str, name: str) -> str:
+    """Генерирует промпт для многоуровневой классификации"""
+    combined = f"{full_name} {name}".strip()
+    
+    return f'''Ты — эксперт по классификации товаров.
+Определи класс оборудования по наименованию.
+
+Используй следующую иерархию:
+
+1 уровень:
+- ИТ Оборудование
+- Оборудование для передачи электрической энергии, сигналов и информации
+- Прочее
+
+2 уровень (в зависимости от 1):
+- Под ИТ Оборудование:
+  - Орттехника
+  - Компьютерная техника
+  - Сетевое оборудование
+  - Прочее
+- Под Оборудование для передачи энергии:
+  - Кабельно-проводниковая продукция
+  - Прочее
+
+3 уровень (в зависимости от 2):
+- Под Орттехника:
+  - МФУ (Многофункциональные устройства)
+- Под Компьютерная техника:
+  - Моноблоки
+  - Мониторы
+- Под Кабельно-проводниковая продукция:
+  - Кабели и провода общепромышленные
+- Под Прочее:
+  - Прочее
+
+Верни строго JSON в формате:
+{{
+  "уровень1": "название первого уровня",
+  "уровень2": "название второго уровня",
+  "уровень3": "название третьего уровня"
+}}
+
+Наименование: "{combined}"
+Ответ:'''
 
 def query_gigachat_model(prompt: str) -> ModelResponse:
     """Запрашивает модель GigaChat"""
@@ -231,6 +291,35 @@ def extract_article_from_full_name(full_name: str) -> str:
     
     return ""
 
+def query_gigachat_classify(prompt: str) -> dict:
+    """Запрашивает GigaChat для классификации (многоуровневая)"""
+    try:
+        logger.info(f"Sending classification prompt to GigaChat: {prompt}")
+        response = giga_chat.chat(prompt)
+        content = response.choices[0].message.content.strip()
+        logger.info(f"Received classification response: {content}")
+
+        # Ищем JSON, возможно обернутый в markdown
+        json_match = re.search(r'```(?:json)?\s*({[^{}]*(?:{[^{}]*}[^{}]*)*})\s*```', content)
+        if not json_match:
+            # Если нет markdown, ищем просто JSON
+            json_match = re.search(r'({[^{}]*(?:{[^{}]*}[^{}]*)*})', content)
+            
+        if json_match:
+            json_str = json_match.group(1)
+            # Заменяем экранированные кавычки
+            json_str = json_str.replace('\\"', '"')
+            data = json.loads(json_str)
+            # Добавляем фолбеки, если поля пустые
+            default = {"уровень1": "Прочее", "уровень2": "Прочее", "уровень3": "Прочее"}
+            return {k: v or default[k] for k, v in data.items()}
+        else:
+            logger.warning(f"No JSON found in classification response: {content}")
+            return {"уровень1": "Прочее", "уровень2": "Прочее", "уровень3": "Прочее"}
+    except Exception as e:
+        logger.error(f"Error in classification query: {e}", exc_info=True)
+        return {"уровень1": "Прочее", "уровень2": "Прочее", "уровень3": "Прочее"}
+        
 # Обновленный обработчик POST
 @app.post("/normalize") # Убираем response_model из декоратора, обрабатываем вручную
 async def normalize_content(request: Request): # Принимаем Request напрямую
@@ -323,6 +412,50 @@ async def normalize_content(request: Request): # Принимаем Request на
         error_msg = f"Ошибка при нормализации: {str(e)}"
         logger.error(error_msg, exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
+
+@app.post("/classify", response_model=ClassifyResponse)
+async def classify_content(request: Request):
+    """
+    Классифицирует оборудование по наименованию с помощью GigaChat (трёхуровнево).
+    """
+    logger.info("Processing classification request")
+
+    try:
+        body_json = await request.json()
+        if "#value" not in body_json or not isinstance(body_json["#value"], list):
+            raise HTTPException(status_code=400, detail="Invalid request body structure")
+
+        items_list = body_json["#value"]
+        results = []
+
+        for i, item_map in enumerate(items_list):
+            if not isinstance(item_map, dict) or item_map.get("#type") != "jv8:Map":
+                logger.warning(f"Skipping item {i}, not a valid jv8:Map")
+                continue
+
+            mdm_key = extract_field_manual(item_map, "mdm_key") or ""
+            full_name = extract_field_manual(item_map, "ПолноеНаименование") or ""
+            name = extract_field_manual(item_map, "Наименование") or ""
+
+            logger.info(f"Classifying item {i+1}: mdm_key={mdm_key}, full_name='{full_name}', name='{name}'")
+
+            classify_result = query_gigachat_classify(generate_classify_prompt(full_name, name))
+
+            results.append(ClassifyResult(
+                mdm_key=mdm_key,
+                наименование=name,
+                полное_наименование=full_name,
+                класс=ClassLevel(**classify_result)
+            ))
+
+        return ClassifyResponse(results=results)
+
+    except json.JSONDecodeError as e:
+        logger.error(f"JSON decode error: {e}")
+        raise HTTPException(status_code=400, detail="Invalid JSON")
+    except Exception as e:
+        logger.error(f"Classification error: {e}", exc_info=True)
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/health")
 async def health_check():
