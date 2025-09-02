@@ -1,7 +1,7 @@
 import time
 import json
 import os
-import re # Не забудьте импорты
+import re
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 import uvicorn
@@ -9,7 +9,7 @@ import logging
 from gigachat import GigaChat
 
 # Создаем директорию и файл с правильными правами
-log_dir = '/app/logs'
+log_dir = './logs'
 os.makedirs(log_dir, exist_ok=True)
 log_file = os.path.join(log_dir, 'server.log')
 
@@ -58,17 +58,12 @@ class Result(BaseModel):
 class NormalizeResponse(BaseModel):
     results: list[Result]
 
-# Модель для многоуровневого класса
-class ClassLevel(BaseModel):
-    уровень1: str
-    уровень2: str
-    уровень3: str
-
+# Модель для классификации (только уровень 3 как строка)
 class ClassifyResult(BaseModel):
-    mdm_key: str
-    наименование: str
+    mdm_key: str = None
+    наименование: str = None
     полное_наименование: str
-    класс: ClassLevel
+    класс: str
 
 class ClassifyResponse(BaseModel):
     results: list[ClassifyResult]
@@ -213,7 +208,6 @@ def query_gigachat_model(prompt: str) -> ModelResponse:
         logger.info(f"Received response from GigaChat: {content}")
         
         # Извлекаем JSON из ответа
-        import re
         json_match = re.search(r'\{[^{}]*\}', content)
         if json_match:
             json_str = json_match.group(0)
@@ -319,10 +313,10 @@ def query_gigachat_classify(prompt: str) -> dict:
     except Exception as e:
         logger.error(f"Error in classification query: {e}", exc_info=True)
         return {"уровень1": "Прочее", "уровень2": "Прочее", "уровень3": "Прочее"}
-        
+
 # Обновленный обработчик POST
-@app.post("/normalize") # Убираем response_model из декоратора, обрабатываем вручную
-async def normalize_content(request: Request): # Принимаем Request напрямую
+@app.post("/normalize")
+async def normalize_content(request: Request):
     """
     Нормализует содержимое с помощью GigaChat,
     возвращает структурированный ответ.
@@ -347,7 +341,7 @@ async def normalize_content(request: Request): # Принимаем Request на
         for i, item_map in enumerate(items_list):
             if not isinstance(item_map, dict) or item_map.get("#type") != "jv8:Map":
                  logger.warning(f"Skipping item {i}, not a valid jv8:Map: {item_map}")
-                 continue # Или можно прервать, если ожидается строго jv8:Map
+                 continue
 
             # Извлекаем поля вручную
             mdm_key = extract_field_manual(item_map, "mdm_key") or ""
@@ -361,7 +355,7 @@ async def normalize_content(request: Request): # Принимаем Request на
             result = Result(
                 mdm_key=mdm_key,
                 артикул="",
-                наименование=name, # Используем извлеченное "Наименование"
+                наименование=name,
                 полное_наименование=full_name,
                 единица_измерения=unit
             )
@@ -395,14 +389,13 @@ async def normalize_content(request: Request): # Принимаем Request на
                       result.артикул = fallback_article
                       logger.info(f"Fallback extracted article: '{result.артикул}'")
 
-
             logger.info(f"Final Result for item {i+1}: mdm_key={result.mdm_key}, article={result.артикул}, normalized_name='{result.наименование}', full_name='{result.полное_наименование}', unit='{result.единица_измерения}'")
             results.append(result)
 
-        # Возвращаем результат, используя модель ответа Pydantic для структуры
+        # Возвращаем результат
         final_response = NormalizeResponse(results=results)
         logger.info(f"Successfully processed {len(results)} items.")
-        return final_response # FastAPI автоматически сериализует Pydantic модель в JSON
+        return final_response
 
     except json.JSONDecodeError as e:
         error_msg = f"Ошибка декодирования JSON тела запроса: {str(e)}"
@@ -413,42 +406,69 @@ async def normalize_content(request: Request): # Принимаем Request на
         logger.error(error_msg, exc_info=True)
         raise HTTPException(status_code=500, detail=error_msg)
 
-@app.post("/classify", response_model=ClassifyResponse)
+@app.post("/classify")
 async def classify_content(request: Request):
     """
-    Классифицирует оборудование по наименованию с помощью GigaChat (трёхуровнево).
+    Классифицирует оборудование по наименованию с помощью GigaChat.
+    Поддерживает обе структуры запроса: упрощённую и jv8:Map.
+    Возвращает только уровень 3 классификации как строку.
     """
     logger.info("Processing classification request")
 
     try:
         body_json = await request.json()
-        if "#value" not in body_json or not isinstance(body_json["#value"], list):
-            raise HTTPException(status_code=400, detail="Invalid request body structure")
-
-        items_list = body_json["#value"]
-        results = []
-
-        for i, item_map in enumerate(items_list):
-            if not isinstance(item_map, dict) or item_map.get("#type") != "jv8:Map":
-                logger.warning(f"Skipping item {i}, not a valid jv8:Map")
-                continue
-
-            mdm_key = extract_field_manual(item_map, "mdm_key") or ""
-            full_name = extract_field_manual(item_map, "ПолноеНаименование") or ""
-            name = extract_field_manual(item_map, "Наименование") or ""
-
-            logger.info(f"Classifying item {i+1}: mdm_key={mdm_key}, full_name='{full_name}', name='{name}'")
-
+        
+        # Проверяем тип запроса
+        if "ПолноеНаименование" in body_json:
+            # Упрощённая структура
+            logger.info("Processing simplified classification request structure")
+            full_name = body_json.get("ПолноеНаименование", "")
+            name = body_json.get("Наименование", "") or full_name
+            mdm_key = body_json.get("mdm_key", "")
+            
+            logger.info(f"Classifying simplified item: mdm_key={mdm_key}, full_name='{full_name}', name='{name}'")
+            
             classify_result = query_gigachat_classify(generate_classify_prompt(full_name, name))
-
-            results.append(ClassifyResult(
+            
+            result = ClassifyResult(
                 mdm_key=mdm_key,
                 наименование=name,
                 полное_наименование=full_name,
-                класс=ClassLevel(**classify_result)
-            ))
+                класс=classify_result.get("уровень3", "Прочее")
+            )
+            
+            return ClassifyResponse(results=[result])
+            
+        else:
+            # Старая структура jv8:Map
+            logger.info("Processing legacy jv8:Map classification request structure")
+            if "#value" not in body_json or not isinstance(body_json["#value"], list):
+                raise HTTPException(status_code=400, detail="Invalid request body structure")
 
-        return ClassifyResponse(results=results)
+            items_list = body_json["#value"]
+            results = []
+
+            for i, item_map in enumerate(items_list):
+                if not isinstance(item_map, dict) or item_map.get("#type") != "jv8:Map":
+                    logger.warning(f"Skipping item {i}, not a valid jv8:Map")
+                    continue
+
+                mdm_key = extract_field_manual(item_map, "mdm_key") or ""
+                full_name = extract_field_manual(item_map, "ПолноеНаименование") or ""
+                name = extract_field_manual(item_map, "Наименование") or ""
+
+                logger.info(f"Classifying item {i+1}: mdm_key={mdm_key}, full_name='{full_name}', name='{name}'")
+
+                classify_result = query_gigachat_classify(generate_classify_prompt(full_name, name))
+
+                results.append(ClassifyResult(
+                    mdm_key=mdm_key,
+                    наименование=name,
+                    полное_наименование=full_name,
+                    класс=classify_result.get("уровень3", "Прочее")
+                ))
+
+            return ClassifyResponse(results=results)
 
     except json.JSONDecodeError as e:
         logger.error(f"JSON decode error: {e}")
