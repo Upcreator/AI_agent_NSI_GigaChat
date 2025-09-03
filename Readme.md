@@ -41,6 +41,11 @@ services:
 docker-compose up -d
 ```
 
+### 5. Запуск сервиса локально
+```bash
+docker run -d -p 8090:8090 -v ${PWD}/logs:/app/logs -e GIGACHAT_CREDENTIALS=NmYxZTE4ZWYtMGFlNy00NDI4LWFiZDItNjRkMjQ0ODFhYmExOmI5YzE5ZjdkLWVhNGMtNGFhMC1hMGI1LTgxMjFiZDhlYzZkZg== --name gigachat-service gigachat-normalizer
+```
+
 ## 📡 Использование
 
 ### Проверка работоспособности
