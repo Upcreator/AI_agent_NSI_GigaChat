@@ -78,7 +78,7 @@ class EnrichmentRequest(BaseModel):
 class EnrichmentResponse(BaseModel):
     ПолноеНаименование: str
     Класс: str
-    Свойства: List[Dict[str, str]]
+    Свойства: Dict[str, str]  # Изменено с List[Dict[str, str]] на Dict[str, str]
 
 # Таблица единиц измерения ОКЕИ
 UNIT_CODES = {
@@ -619,8 +619,8 @@ async def enrichment_content(request: EnrichmentRequest):
         # Запрашиваем у GigaChat
         enriched_properties = query_gigachat_enrichment(prompt)
         
-        # Форматируем результат
-        result_properties = []
+        # Форматируем результат как один объект со всеми свойствами
+        result_properties = {}
         for prop_name in properties:
             value = enriched_properties.get(prop_name, "")
             
@@ -665,16 +665,11 @@ async def enrichment_content(request: EnrichmentRequest):
                             len(potential_manufacturer) > 2):
                             value = potential_manufacturer
             
-            result_properties.append({prop_name: value})
+            result_properties[prop_name] = value
         
         # Если производитель есть в наименовании, пытаемся улучшить полное наименование
         enriched_full_name = full_name
-        manufacturer = None
-        for prop_dict in result_properties:
-            if "Производитель" in prop_dict and prop_dict["Производитель"]:
-                manufacturer = prop_dict["Производитель"]
-                break
-        
+        manufacturer = result_properties.get("Производитель")
         if manufacturer and manufacturer != "Не определен" and manufacturer.lower() not in full_name.lower():
             # Простая логика добавления производителя в начало
             if not full_name.startswith(manufacturer):
