@@ -4,6 +4,7 @@ import os
 import re
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
 import uvicorn
 import logging
 from gigachat import GigaChat
@@ -67,6 +68,50 @@ class ClassifyResult(BaseModel):
 
 class ClassifyResponse(BaseModel):
     results: list[ClassifyResult]
+
+# Модели для обогащения данных
+class EnrichmentRequest(BaseModel):
+    ПолноеНаименование: str
+    Класс: str
+    Свойства: List[str]
+
+class EnrichmentResponse(BaseModel):
+    ПолноеНаименование: str
+    Класс: str
+    Свойства: List[Dict[str, str]]
+
+# Таблица единиц измерения ОКЕИ
+UNIT_CODES = {
+    "006": "МЕТР",
+    "055": "КВАДРАТНЫЙ МЕТР",
+    "112": "ЛИТР",
+    "113": "КУБИЧЕСКИЙ МЕТР",
+    "114": "1000 КУБИЧЕСКИХ МЕТРОВ",
+    "130": "1000 ЛИТРОВ",
+    "162": "МЕТРИЧЕСКИЙ КАРАТ",
+    "163": "ГРАММ",
+    "166": "КИЛОГРАММ",
+    "185": "ГРУЗОПОДЪЕМНОСТЬ В ТОННАХ",
+    "246": "1000 КИЛОВАТТ-ЧАС",
+    "305": "КЮРИ",
+    "306": "ГРАММ ДЕЛЯЩИХСЯ ИЗОТОПОВ",
+    "715": "ПАРА",
+    "796": "ШТУКА",
+    "797": "СТО ШТУК",
+    "798": "ТЫСЯЧА ШТУК",
+    "831": "ЛИТР ЧИСТОГО (100%) СПИРТА",
+    "841": "КИЛОГРАММ ПЕРОКСИДА ВОДОРОДА",
+    "845": "КИЛОГРАММ СУХОГО НА 90 % ВЕЩЕСТВА",
+    "852": "КИЛОГРАММ ОКСИДА КАЛИЯ",
+    "859": "КИЛОГРАММ ГИДРОКСИДА КАЛИЯ",
+    "861": "КИЛОГРАММ АЗОТА",
+    "863": "КИЛОГРАММ ГИДРОКСИДА НАТРИЯ",
+    "865": "КИЛОГРАММ ПЯТИОКИСИ ФОСФОРА",
+    "867": "КИЛОГРАММ УРАНА"
+}
+
+# Обратный словарь для поиска кода по наименованию
+UNIT_NAMES_TO_CODES = {v: k for k, v in UNIT_CODES.items()}
 
 # Инициализация GigaChat
 giga_chat = GigaChat(
@@ -199,6 +244,58 @@ def generate_classify_prompt(full_name: str, name: str) -> str:
 Наименование: "{combined}"
 Ответ:'''
 
+def generate_enrichment_prompt(full_name: str, product_class: str, properties: List[str]) -> str:
+    """Генерирует промпт для обогащения данных"""
+    
+    properties_description = []
+    for prop in properties:
+        if prop == "Единица измерения":
+            properties_description.append("- Единица измерения: код по ОКЕИ (например, 796 для Штука, 006 для Метр). Анализируй контекст - если это кабель, вероятно измеряется в метрах (006)")
+        elif prop == "Производитель":
+            properties_description.append("- Производитель: название компании-производителя. Если в наименовании есть аббревиатура или часть названия компании, извлеки её")
+        else:
+            properties_description.append(f"- {prop}: соответствующее значение")
+    
+    properties_list = "\n".join(properties_description)
+    
+    # Формируем таблицу единиц измерения для промпта
+    unit_table_lines = []
+    for code, name in list(UNIT_CODES.items())[:15]:  # Показываем первые 15 записей
+        unit_table_lines.append(f"{code};{name}")
+    unit_table = "\n".join(unit_table_lines)
+    
+    return f'''Ты — эксперт по анализу товаров и оборудования.
+Проанализируй наименование товара и класс, чтобы определить запрошенные свойства.
+
+Таблица единиц измерения (ОКЕИ):
+{unit_table}
+... (таблица продолжается)
+
+Наименование товара: "{full_name}"
+Класс товара: "{product_class}"
+
+Запрошенные свойства:
+{properties_list}
+
+Анализируй наименование внимательно:
+- Для кабелей и проводов стандартная единица измерения - метры (006)
+- Производитель может быть частью названия (например, MAXX в "Кабель MAXX КГтп-ЬТ 14х400")
+- Если производитель не указан явно, поставь "Не определен"
+
+Верни строго JSON в формате:
+{{
+  "Свойства": {{
+    "Единица измерения": "код",
+    "Производитель": "название"
+  }}
+}}
+
+Примеры:
+Наименование: "Кабель MAXX КГтп-ЬТ 14х400" -> {{"Свойства": {{"Единица измерения": "006", "Производитель": "MAXX"}}}}
+Наименование: "Монитор Samsung 24\"" -> {{"Свойства": {{"Единица измерения": "796", "Производитель": "Samsung"}}}}
+
+Ответ:'''
+
 def query_gigachat_model(prompt: str) -> ModelResponse:
     """Запрашивает модель GigaChat"""
     try:
@@ -313,6 +410,31 @@ def query_gigachat_classify(prompt: str) -> dict:
     except Exception as e:
         logger.error(f"Error in classification query: {e}", exc_info=True)
         return {"уровень1": "Прочее", "уровень2": "Прочее", "уровень3": "Прочее"}
+
+def query_gigachat_enrichment(prompt: str) -> dict:
+    """Запрашивает GigaChat для обогащения данных"""
+    try:
+        logger.info(f"Sending enrichment prompt to GigaChat")
+        response = giga_chat.chat(prompt)
+        content = response.choices[0].message.content.strip()
+        logger.info(f"Received enrichment response: {content}")
+
+        # Ищем JSON в ответе
+        json_match = re.search(r'```(?:json)?\s*({[^{}]*(?:{[^{}]*}[^{}]*)*})\s*```', content)
+        if not json_match:
+            json_match = re.search(r'({[^{}]*(?:{[^{}]*}[^{}]*)*})', content)
+            
+        if json_match:
+            json_str = json_match.group(1)
+            json_str = json_str.replace('\\"', '"')
+            data = json.loads(json_str)
+            return data.get("Свойства", {})
+        else:
+            logger.warning(f"No JSON found in enrichment response: {content}")
+            return {}
+    except Exception as e:
+        logger.error(f"Error in enrichment query: {e}", exc_info=True)
+        return {}
 
 # Обновленный обработчик POST
 @app.post("/normalize")
@@ -476,6 +598,101 @@ async def classify_content(request: Request):
     except Exception as e:
         logger.error(f"Classification error: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/enrichment", response_model=EnrichmentResponse)
+async def enrichment_content(request: EnrichmentRequest):
+    """
+    Обогащает данные о товаре, извлекая дополнительные свойства с помощью GigaChat
+    """
+    logger.info(f"Processing enrichment request for: {request.ПолноеНаименование}")
+    
+    try:
+        full_name = request.ПолноеНаименование
+        product_class = request.Класс
+        properties = request.Свойства
+        
+        logger.info(f"Enriching item: full_name='{full_name}', class='{product_class}', properties={properties}")
+        
+        # Генерируем промпт для LLM
+        prompt = generate_enrichment_prompt(full_name, product_class, properties)
+        
+        # Запрашиваем у GigaChat
+        enriched_properties = query_gigachat_enrichment(prompt)
+        
+        # Форматируем результат
+        result_properties = []
+        for prop_name in properties:
+            value = enriched_properties.get(prop_name, "")
+            
+            # Для единицы измерения применяем логику по умолчанию
+            if prop_name == "Единица измерения" and (not value or value == ""):
+                # Логика по умолчанию для разных классов
+                if "кабел" in product_class.lower() or "провод" in product_class.lower():
+                    value = "006"  # Метр для кабелей
+                elif "штука" in full_name.lower() or "комплект" in full_name.lower():
+                    value = "796"  # Штука
+                else:
+                    value = "796"  # По умолчанию штука
+            
+            # Для единицы измерения пытаемся найти код по наименованию, если пришло не число
+            if prop_name == "Единица измерения" and value and not value.isdigit():
+                # Ищем в таблице по наименованию
+                normalized_value = value.upper().strip()
+                # Убираем скобки и лишние символы для поиска
+                clean_value = re.sub(r'\s*\(.*?\)\s*', '', normalized_value).strip()
+                if clean_value in UNIT_NAMES_TO_CODES:
+                    value = UNIT_NAMES_TO_CODES[clean_value]
+                elif normalized_value in UNIT_NAMES_TO_CODES:
+                    value = UNIT_NAMES_TO_CODES[normalized_value]
+            
+            # Для производителя применяем простую логику извлечения
+            if prop_name == "Производитель" and (not value or value == ""):
+                # Пытаемся найти производителя в наименовании
+                # Ищем известные бренды или аббревиатуры в начале названия
+                words = full_name.split()
+                if len(words) > 1:
+                    potential_manufacturer = words[1]  # Обычно производитель идет после типа товара
+                    # Простая проверка - если слово состоит из букв и не является стандартными терминами
+                    if (potential_manufacturer.isalpha() and 
+                        potential_manufacturer.lower() not in ["кгтп", "кг", "ввг", "пвс", "шввп", "кгт", "тьт"] and
+                        len(potential_manufacturer) > 2):
+                        value = potential_manufacturer
+                    # Если не нашли в слове 1, пробуем слово 0 (если оно не "Кабель")
+                    elif len(words) > 2 and words[0].lower() == "кабель":
+                        potential_manufacturer = words[2]
+                        if (potential_manufacturer.isalpha() and 
+                            potential_manufacturer.lower() not in ["кгтп", "кг", "ввг", "пвс", "шввп", "кгт", "тьт"] and
+                            len(potential_manufacturer) > 2):
+                            value = potential_manufacturer
+            
+            result_properties.append({prop_name: value})
+        
+        # Если производитель есть в наименовании, пытаемся улучшить полное наименование
+        enriched_full_name = full_name
+        manufacturer = None
+        for prop_dict in result_properties:
+            if "Производитель" in prop_dict and prop_dict["Производитель"]:
+                manufacturer = prop_dict["Производитель"]
+                break
+        
+        if manufacturer and manufacturer != "Не определен" and manufacturer.lower() not in full_name.lower():
+            # Простая логика добавления производителя в начало
+            if not full_name.startswith(manufacturer):
+                enriched_full_name = f"{manufacturer} {full_name}"
+        
+        response = EnrichmentResponse(
+            ПолноеНаименование=enriched_full_name,
+            Класс=product_class,
+            Свойства=result_properties
+        )
+        
+        logger.info(f"Enrichment completed: {response}")
+        return response
+        
+    except Exception as e:
+        error_msg = f"Error during enrichment: {str(e)}"
+        logger.error(error_msg, exc_info=True)
+        raise HTTPException(status_code=500, detail=error_msg)
 
 @app.get("/health")
 async def health_check():
