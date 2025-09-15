@@ -73,12 +73,12 @@ class ClassifyResponse(BaseModel):
 class EnrichmentRequest(BaseModel):
     ПолноеНаименование: str
     Класс: str
-    Свойства: List[str]
+    Свойства: Dict[str, str]  # Изменено на Dict для передачи свойств
 
 class EnrichmentResponse(BaseModel):
     ПолноеНаименование: str
     Класс: str
-    Свойства: Dict[str, str]  # Изменено с List[Dict[str, str]] на Dict[str, str]
+    Свойства: Dict[str, str]
 
 # Таблица единиц измерения ОКЕИ
 UNIT_CODES = {
@@ -244,19 +244,57 @@ def generate_classify_prompt(full_name: str, name: str) -> str:
 Наименование: "{combined}"
 Ответ:'''
 
-def generate_enrichment_prompt(full_name: str, product_class: str, properties: List[str]) -> str:
+def generate_enrichment_prompt(full_name: str, product_class: str, properties: Dict[str, str]) -> str:
     """Генерирует промпт для обогащения данных"""
     
-    properties_description = []
-    for prop in properties:
-        if prop == "Единица измерения":
-            properties_description.append("- Единица измерения: код по ОКЕИ (например, 796 для Штука, 006 для Метр). Анализируй контекст - если это кабель, вероятно измеряется в метрах (006)")
-        elif prop == "Производитель":
-            properties_description.append("- Производитель: название компании-производителя. Если в наименовании есть аббревиатура или часть названия компании, извлеки её")
-        else:
-            properties_description.append(f"- {prop}: соответствующее значение")
+    # Определяем примеры и инструкции в зависимости от класса
+    class_specific_instructions = ""
+    examples = ""
     
-    properties_list = "\n".join(properties_description)
+    if "кабел" in product_class.lower() or "провод" in product_class.lower():
+        class_specific_instructions = """Для кабелей и проводов:
+- Марка: указывается в наименовании, например КГтп-ЬТ
+- Количество жил и размер сечения: указывается как числоxсечение, например 14x400 мм²
+- Номинальное переменное напряжение: указывается в кВ
+- Конструкция жилы: медная многопроволочная или медная однопроволочная
+- Тип брони: стальная лента, стальная проволока, без брони
+- Цвет изоляции: черный, белый, синий, желто-зеленый и т.д.
+- Фасовка: указывается в метрах"""
+        examples = """Примеры:
+Наименование: "Кабель КГтп-ЬТ 14x400 1кВ бронированный с медными жилами" -> {"Марка": "КГтп-ЬТ", "Количество жил и размер сечения": "14x400 мм²", "Номинальное переменное напряжение (кВ)": "1", "Конструкция жилы": "Медная многопроволочная", "Тип брони": "Стальная лента", "Цвет изоляции": "Черный", "Фасовка (м)": "500"}"""
+    
+    elif "моноблок" in product_class.lower():
+        class_specific_instructions = """Для моноблоков:
+- Модель: указывается после названия производителя
+- Диагональ экрана: указывается в дюймах
+- Процессор: полное название процессора
+- Оперативная память: объем в ГБ
+- Накопитель: объем и тип накопителя (SSD, HDD)
+- Тип матрицы: IPS, TN, VA
+- Операционная система: Windows, macOS и версия
+- Цвет корпуса: цвет корпуса устройства"""
+        examples = """Примеры:
+Наименование: "Моноблок MAXX Pro 27\" Intel Core i7-12700 16GB RAM 512GB SSD" -> {"Модель": "Pro 27", "Диагональ экрана": "27 дюймов", "Процессор": "Intel Core i7-12700", "Оперативная память": "16 ГБ", "Накопитель": "512 ГБ SSD", "Тип матрицы": "IPS", "Операционная система": "Windows 11 Pro", "Цвет корпуса": "Серый космос"}"""
+    
+    elif "монитор" in product_class.lower():
+        class_specific_instructions = """Для мониторов:
+- Модель: указывается после названия производителя
+- Диагональ экрана: указывается в дюймах
+- Разрешение экрана: полное разрешение и тип (4K UHD, Full HD и т.д.)
+- Тип матрицы: IPS, TN, VA
+- Частота обновления: указывается в Hz
+- Форма экрана: плоский, изогнутый
+- Порты подключения: перечисляются все доступные порты
+- Яркость: указывается в кд/м²"""
+        examples = """Примеры:
+Наименование: "Монитор MAXX Vision 24\" 4K UHD VA 144Hz с изогнутым экраном" -> {"Модель": "Vision 24", "Диагональ экрана": "24 дюйма", "Разрешение экрана": "3840x2160 (4K UHD)", "Тип матрицы": "VA", "Частота обновления (Hz)": "144", "Форма экрана": "Изогнутый", "Порты подключения": "HDMI 2.1, DisplayPort 1.4, USB-C", "Яркость (кд/м²)": "350"}"""
+    
+    else:
+        class_specific_instructions = "Анализируй наименование и извлекай запрошенные свойства"
+        examples = "Примеры не предоставлены для данного класса"
+    
+    # Формируем список свойств для запроса
+    properties_list = "\n".join([f"- {key}" for key in properties.keys()])
     
     # Формируем таблицу единиц измерения для промпта
     unit_table_lines = []
@@ -266,6 +304,8 @@ def generate_enrichment_prompt(full_name: str, product_class: str, properties: L
     
     return f'''Ты — эксперт по анализу товаров и оборудования.
 Проанализируй наименование товара и класс, чтобы определить запрошенные свойства.
+
+{class_specific_instructions}
 
 Таблица единиц измерения (ОКЕИ):
 {unit_table}
@@ -277,22 +317,18 @@ def generate_enrichment_prompt(full_name: str, product_class: str, properties: L
 Запрошенные свойства:
 {properties_list}
 
-Анализируй наименование внимательно:
-- Для кабелей и проводов стандартная единица измерения - метры (006)
-- Производитель может быть частью названия (например, MAXX в "Кабель MAXX КГтп-ЬТ 14х400")
-- Если производитель не указан явно, поставь "Не определен"
+{examples}
+
+Анализируй наименование внимательно и извлекай только те значения, которые можно однозначно определить из текста.
+Если какое-то свойство не может быть определено, поставь "Не определено"
+Если значение свойства не указано явно, но может быть вычислено или определено по контексту, укажи вычисленное значение.
 
 Верни строго JSON в формате:
 {{
   "Свойства": {{
-    "Единица измерения": "код",
-    "Производитель": "название"
+    "Название свойства": "Значение свойства"
   }}
 }}
-
-Примеры:
-Наименование: "Кабель MAXX КГтп-ЬТ 14х400" -> {{"Свойства": {{"Единица измерения": "006", "Производитель": "MAXX"}}}}
-Наименование: "Монитор Samsung 24\"" -> {{"Свойства": {{"Единица измерения": "796", "Производитель": "Samsung"}}}}
 
 Ответ:'''
 
@@ -427,8 +463,43 @@ def query_gigachat_enrichment(prompt: str) -> dict:
         if json_match:
             json_str = json_match.group(1)
             json_str = json_str.replace('\\"', '"')
-            data = json.loads(json_str)
-            return data.get("Свойства", {})
+            
+            # Очищаем JSON от комментариев и некорректных символов
+            # Удаляем строки, содержащие комментарии
+            lines = json_str.split('\n')
+            cleaned_lines = []
+            for line in lines:
+                # Удаляем комментарии в стиле // и /*
+                line = re.sub(r'//.*$', '', line)
+                line = re.sub(r'/\*.*?\*/', '', line)
+                # Удаляем непечатаемые символы
+                line = re.sub(r'[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]', '', line)
+                cleaned_lines.append(line)
+            
+            cleaned_json = '\n'.join(cleaned_lines)
+            
+            # Попытка парсинга очищенного JSON
+            try:
+                data = json.loads(cleaned_json)
+                return data.get("Свойства", {})
+            except json.JSONDecodeError as e:
+                logger.warning(f"JSON decode error after cleaning: {e}")
+                # Если не удалось распарсить, попробуем извлечь свойства регулярными выражениями
+                properties = {}
+                # Ищем все пары ключ-значение
+                prop_matches = re.findall(r'"([^"]+)"\s*:\s*"([^"]*)"', cleaned_json)
+                for key, value in prop_matches:
+                    # Удаляем комментарии из значений
+                    clean_value = re.sub(r'//.*$', '', value).strip()
+                    clean_value = re.sub(r'/\*.*?\*/', '', clean_value).strip()
+                    # Удаляем кавычки в начале/конце если есть
+                    clean_value = clean_value.strip('"')
+                    # Если значение содержит "Не определено", заменяем на "Не определено"
+                    if "не определ" in clean_value.lower() or clean_value == "":
+                        properties[key] = "Не определено"
+                    else:
+                        properties[key] = clean_value
+                return properties if properties else {}
         else:
             logger.warning(f"No JSON found in enrichment response: {content}")
             return {}
@@ -611,7 +682,7 @@ async def enrichment_content(request: EnrichmentRequest):
         product_class = request.Класс
         properties = request.Свойства
         
-        logger.info(f"Enriching item: full_name='{full_name}', class='{product_class}', properties={properties}")
+        logger.info(f"Enriching item: full_name='{full_name}', class='{product_class}', properties={list(properties.keys())}")
         
         # Генерируем промпт для LLM
         prompt = generate_enrichment_prompt(full_name, product_class, properties)
@@ -621,62 +692,43 @@ async def enrichment_content(request: EnrichmentRequest):
         
         # Форматируем результат как один объект со всеми свойствами
         result_properties = {}
-        for prop_name in properties:
-            value = enriched_properties.get(prop_name, "")
-            
-            # Для единицы измерения применяем логику по умолчанию
-            if prop_name == "Единица измерения" and (not value or value == ""):
-                # Логика по умолчанию для разных классов
-                if "кабел" in product_class.lower() or "провод" in product_class.lower():
-                    value = "006"  # Метр для кабелей
-                elif "штука" in full_name.lower() or "комплект" in full_name.lower():
-                    value = "796"  # Штука
-                else:
-                    value = "796"  # По умолчанию штука
-            
-            # Для единицы измерения пытаемся найти код по наименованию, если пришло не число
-            if prop_name == "Единица измерения" and value and not value.isdigit():
-                # Ищем в таблице по наименованию
-                normalized_value = value.upper().strip()
-                # Убираем скобки и лишние символы для поиска
-                clean_value = re.sub(r'\s*\(.*?\)\s*', '', normalized_value).strip()
-                if clean_value in UNIT_NAMES_TO_CODES:
-                    value = UNIT_NAMES_TO_CODES[clean_value]
-                elif normalized_value in UNIT_NAMES_TO_CODES:
-                    value = UNIT_NAMES_TO_CODES[normalized_value]
-            
-            # Для производителя применяем простую логику извлечения
-            if prop_name == "Производитель" and (not value or value == ""):
-                # Пытаемся найти производителя в наименовании
-                # Ищем известные бренды или аббревиатуры в начале названия
-                words = full_name.split()
-                if len(words) > 1:
-                    potential_manufacturer = words[1]  # Обычно производитель идет после типа товара
-                    # Простая проверка - если слово состоит из букв и не является стандартными терминами
+        for prop_name in properties.keys():
+            value = enriched_properties.get(prop_name, "Не определено")
+            # Если значение пустое или содержит "не определ", ставим "Не определено"
+            if not value or "не определ" in str(value).lower():
+                value = "Не определено"
+            result_properties[prop_name] = value
+        
+        # Добавляем единицу измерения и производителя по умолчанию если они не определены
+        if "Единица измерения" in properties and result_properties.get("Единица измерения") == "Не определено":
+            # Логика по умолчанию для разных классов
+            if "кабел" in product_class.lower() or "провод" in product_class.lower():
+                result_properties["Единица измерения"] = "006"  # Метр для кабелей
+            elif "штука" in full_name.lower() or "комплект" in full_name.lower():
+                result_properties["Единица измерения"] = "796"  # Штука
+            else:
+                result_properties["Единица измерения"] = "796"  # По умолчанию штука
+        
+        if "Производитель" in properties and result_properties.get("Производитель") == "Не определено":
+            # Пытаемся найти производителя в наименовании
+            words = full_name.split()
+            if len(words) > 1:
+                potential_manufacturer = words[1]  # Обычно производитель идет после типа товара
+                # Простая проверка - если слово состоит из букв и не является стандартными терминами
+                if (potential_manufacturer.isalpha() and 
+                    potential_manufacturer.lower() not in ["кгтп", "кг", "ввг", "пвс", "шввп", "кгт", "тьт"] and
+                    len(potential_manufacturer) > 2):
+                    result_properties["Производитель"] = potential_manufacturer
+                # Если не нашли в слове 1, пробуем слово 0 (если оно не "Кабель")
+                elif len(words) > 2 and words[0].lower() == "кабель":
+                    potential_manufacturer = words[2]
                     if (potential_manufacturer.isalpha() and 
                         potential_manufacturer.lower() not in ["кгтп", "кг", "ввг", "пвс", "шввп", "кгт", "тьт"] and
                         len(potential_manufacturer) > 2):
-                        value = potential_manufacturer
-                    # Если не нашли в слове 1, пробуем слово 0 (если оно не "Кабель")
-                    elif len(words) > 2 and words[0].lower() == "кабель":
-                        potential_manufacturer = words[2]
-                        if (potential_manufacturer.isalpha() and 
-                            potential_manufacturer.lower() not in ["кгтп", "кг", "ввг", "пвс", "шввп", "кгт", "тьт"] and
-                            len(potential_manufacturer) > 2):
-                            value = potential_manufacturer
-            
-            result_properties[prop_name] = value
-        
-        # Если производитель есть в наименовании, пытаемся улучшить полное наименование
-        enriched_full_name = full_name
-        manufacturer = result_properties.get("Производитель")
-        if manufacturer and manufacturer != "Не определен" and manufacturer.lower() not in full_name.lower():
-            # Простая логика добавления производителя в начало
-            if not full_name.startswith(manufacturer):
-                enriched_full_name = f"{manufacturer} {full_name}"
+                        result_properties["Производитель"] = potential_manufacturer
         
         response = EnrichmentResponse(
-            ПолноеНаименование=enriched_full_name,
+            ПолноеНаименование=full_name,
             Класс=product_class,
             Свойства=result_properties
         )
